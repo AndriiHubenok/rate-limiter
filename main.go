@@ -38,7 +38,7 @@ func main() {
 			if !res {
 				fmt.Println("LIMITED retry_after=60")
 			} else {
-				fmt.Println("OK ", attemptsLeft)
+				fmt.Println("OK", attemptsLeft)
 			}
 		}
 	}
@@ -84,7 +84,7 @@ func NewEndpoint(id string, lastTimeOfRequest int) *Endpoint {
 }
 
 func (e *Endpoint) updateAttemptsLeft(currentTime int) {
-	if currentTime%60 > e.lastTimeOfRequest%60 {
+	if currentTime/60 > e.lastTimeOfRequest/60 {
 		e.attemptsLeft = 5
 	}
 	e.lastTimeOfRequest = currentTime
