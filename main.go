@@ -33,13 +33,12 @@ func main() {
 				conf.requests[args[0]] = NewEndpoint(args[0], conf.time)
 			}
 
-			res, attemptsLeft := conf.makeRequest(args[0])
+			status, remaining, resetTime := conf.makeRequest(args[0])
 
-			if !res {
-				fmt.Println("LIMITED retry_after=60")
-			} else {
-				fmt.Println("OK", attemptsLeft)
-			}
+			fmt.Println("X-RateLimit-Limit: 10")
+			fmt.Printf("X-RateLimit-Remaining: %d\n", remaining)
+			fmt.Printf("X-RateLimit-Reset: %d\n", resetTime)
+			fmt.Printf("status: %d\n", status)
 		}
 	}
 }
@@ -60,13 +59,11 @@ func (c *Config) updateTime(time int) {
 	c.time = time
 }
 
-func (c *Config) makeRequest(name string) (bool, int) {
+func (c *Config) makeRequest(name string) (int, int, int) {
 	if value, ok := c.requests[name]; ok {
-		res, attemptsLeft := value.request(c.time)
-		return res, attemptsLeft
+		return value.request(c.time)
 	}
-
-	return false, -1
+	return 429, 0, 0
 }
 
 type Endpoint struct {
@@ -79,24 +76,26 @@ func NewEndpoint(id string, lastTimeOfRequest int) *Endpoint {
 	return &Endpoint{
 		id:                id,
 		lastTimeOfRequest: lastTimeOfRequest,
-		attemptsLeft:      5,
+		attemptsLeft:      10,
 	}
 }
 
 func (e *Endpoint) updateAttemptsLeft(currentTime int) {
 	if currentTime/60 > e.lastTimeOfRequest/60 {
-		e.attemptsLeft = 5
+		e.attemptsLeft = 10
 	}
 	e.lastTimeOfRequest = currentTime
 }
 
-func (e *Endpoint) request(currentTime int) (bool, int) {
+func (e *Endpoint) request(currentTime int) (int, int, int) {
 	e.updateAttemptsLeft(currentTime)
 
+	resetTime := (currentTime/60)*60 + 60
+
 	if e.attemptsLeft <= 0 {
-		return false, -1
+		return 429, 0, resetTime
 	}
 
 	e.attemptsLeft--
-	return true, e.attemptsLeft
+	return 200, e.attemptsLeft, resetTime
 }
