@@ -30,24 +30,23 @@ func main() {
 			conf.updateTime(time)
 		} else if cmd == "REQUEST" {
 			if _, ok := conf.endpoints[args[0]]; !ok {
-				conf.endpoints[args[0]] = NewTokenEndpoint(args[0], 10.0, 1.0)
+				conf.endpoints[args[0]] = NewLeakyEndpoint(args[0], 5, 1.0)
 			}
 
-			status, used := conf.makeRequest(args[0])
+			status, used, _ := conf.makeRequest(args[0])
 
 			if status == 200 {
-				fmt.Printf("OK %.2f\n", used)
+				fmt.Printf("OK %.2f\n", float64(used))
 			} else {
 				fmt.Println("LIMITED")
 			}
 
 		} else if cmd == "STATUS" {
 			if _, ok := conf.endpoints[args[0]]; !ok {
-				conf.endpoints[args[0]] = NewTokenEndpoint(args[0], 10.0, 1.0)
+				conf.endpoints[args[0]] = NewLeakyEndpoint(args[0], 5, 1.0)
 			}
 
-			conf.endpoints[args[0]].updateTokens(conf.time)
-			fmt.Printf("tokens=%.2f\n", conf.endpoints[args[0]].currentTokens)
+			fmt.Printf("water=%.2f\n", float64(conf.endpoints[args[0]].GetTokens(conf.time)))
 		}
 	}
 }
@@ -55,14 +54,14 @@ func main() {
 type Config struct {
 	time int
 	//endpoints map[string]*Endpoint
-	endpoints map[string]*TokenEndpoint
+	endpoints map[string]Limiter
 }
 
 func NewConfig() *Config {
 	return &Config{
 		time: 0,
 		//endpoints: make(map[string]*Endpoint),
-		endpoints: make(map[string]*TokenEndpoint),
+		endpoints: make(map[string]Limiter),
 	}
 }
 
@@ -70,11 +69,17 @@ func (c *Config) updateTime(time int) {
 	c.time = time
 }
 
-func (c *Config) makeRequest(name string) (int, float64) {
+func (c *Config) makeRequest(name string) (int, int, int) {
 	if value, ok := c.endpoints[name]; ok {
-		return value.request(c.time)
+		return value.Request(c.time)
 	}
-	return 429, 0
+	return 429, 0, 0
+}
+
+type Limiter interface {
+	Request(currentTime int) (status int, remaining int, resetTime int)
+	UpdateTokens(currentTime int)
+	GetTokens(currentTime int) int
 }
 
 type Endpoint struct {
@@ -97,7 +102,7 @@ func (e *Endpoint) updateAttemptsLeft(currentTime int) {
 
 }
 
-func (e *Endpoint) request(currentTime int) (int, int) {
+func (e *Endpoint) Request(currentTime int) (int, int, int) {
 
 	if len(e.lastRequestsTime) >= e.maxRequestsPerWindow {
 
@@ -107,13 +112,13 @@ func (e *Endpoint) request(currentTime int) (int, int) {
 			e.lastRequestsTime = append(e.lastRequestsTime, currentTime)
 
 		} else {
-			return 429, len(e.lastRequestsTime)
+			return 429, len(e.lastRequestsTime), 0
 		}
 	} else {
 		e.lastRequestsTime = append(e.lastRequestsTime, currentTime)
 	}
 
-	return 200, len(e.lastRequestsTime)
+	return 200, len(e.lastRequestsTime), 0
 }
 
 type TokenEndpoint struct {
@@ -135,7 +140,7 @@ func NewTokenEndpoint(id string, maxTokens int, refillRate float64) *TokenEndpoi
 	}
 }
 
-func (t *TokenEndpoint) updateTokens(currentTime int) {
+func (t *TokenEndpoint) UpdateTokens(currentTime int) {
 
 	newTokens := float64(currentTime-t.lastRequestTime)*t.refillRate + t.currentTokens
 
@@ -144,16 +149,65 @@ func (t *TokenEndpoint) updateTokens(currentTime int) {
 	} else {
 		t.currentTokens = newTokens
 	}
+	t.lastRequestTime = currentTime
 }
 
-func (t *TokenEndpoint) request(currentTime int) (int, float64) {
+func (t *TokenEndpoint) Request(currentTime int) (int, int, int) {
 
-	t.updateTokens(currentTime)
+	t.UpdateTokens(currentTime)
 
 	if t.currentTokens < 1 {
-		return 429, 0
+		return 429, 0, 0
 	}
 
 	t.currentTokens--
-	return 200, t.currentTokens
+	return 200, int(t.currentTokens), 0
+}
+
+type LeakyEndpoint struct {
+	id              string
+	maxTokens       float64
+	currentTokens   float64
+	refillRate      float64
+	lastRequestTime int
+}
+
+func NewLeakyEndpoint(id string, maxTokens int, refillRate float64) *LeakyEndpoint {
+
+	return &LeakyEndpoint{
+		id:              id,
+		maxTokens:       float64(maxTokens),
+		currentTokens:   0,
+		refillRate:      refillRate,
+		lastRequestTime: 0,
+	}
+}
+
+func (l *LeakyEndpoint) UpdateTokens(currentTime int) {
+
+	newTokens := l.currentTokens - float64(currentTime-l.lastRequestTime)*l.refillRate
+
+	if newTokens <= 0 {
+		l.currentTokens = 0
+	} else {
+		l.currentTokens = newTokens
+	}
+	l.lastRequestTime = currentTime
+}
+
+func (l *LeakyEndpoint) Request(currentTime int) (int, int, int) {
+
+	l.UpdateTokens(currentTime)
+
+	if l.currentTokens >= 5 {
+		return 429, 0, 0
+	}
+
+	l.currentTokens++
+	return 200, int(l.currentTokens), 0
+}
+
+func (l *LeakyEndpoint) GetTokens(currentTime int) int {
+	l.UpdateTokens(currentTime)
+	return int(l.currentTokens)
 }
