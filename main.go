@@ -29,29 +29,30 @@ func main() {
 			}
 			conf.updateTime(time)
 		} else if cmd == "REQUEST" {
-			if _, ok := conf.requests[args[0]]; !ok {
-				conf.requests[args[0]] = NewEndpoint(args[0], conf.time)
+			if _, ok := conf.endpoints[args[0]]; !ok {
+				conf.endpoints[args[0]] = NewEndpoint(args[0], 60, 5)
 			}
 
-			status, remaining, resetTime := conf.makeRequest(args[0])
+			status, used := conf.makeRequest(args[0])
 
-			fmt.Println("X-RateLimit-Limit: 10")
-			fmt.Printf("X-RateLimit-Remaining: %d\n", remaining)
-			fmt.Printf("X-RateLimit-Reset: %d\n", resetTime)
-			fmt.Printf("status: %d\n", status)
+			if status == 200 {
+				fmt.Printf("OK %d\n", used)
+			} else {
+				fmt.Println("LIMITED")
+			}
 		}
 	}
 }
 
 type Config struct {
-	time     int
-	requests map[string]*Endpoint
+	time      int
+	endpoints map[string]*Endpoint
 }
 
 func NewConfig() *Config {
 	return &Config{
-		time:     0,
-		requests: make(map[string]*Endpoint),
+		time:      0,
+		endpoints: make(map[string]*Endpoint),
 	}
 }
 
@@ -59,43 +60,48 @@ func (c *Config) updateTime(time int) {
 	c.time = time
 }
 
-func (c *Config) makeRequest(name string) (int, int, int) {
-	if value, ok := c.requests[name]; ok {
+func (c *Config) makeRequest(name string) (int, int) {
+	if value, ok := c.endpoints[name]; ok {
 		return value.request(c.time)
 	}
-	return 429, 0, 0
+	return 429, 0
 }
 
 type Endpoint struct {
-	id                string
-	lastTimeOfRequest int
-	attemptsLeft      int
+	id                   string
+	windowTime           int
+	maxRequestsPerWindow int
+	lastRequestsTime     []int
 }
 
-func NewEndpoint(id string, lastTimeOfRequest int) *Endpoint {
+func NewEndpoint(id string, windowTime int, maxRequestsPerWindow int) *Endpoint {
 	return &Endpoint{
-		id:                id,
-		lastTimeOfRequest: lastTimeOfRequest,
-		attemptsLeft:      10,
+		id:                   id,
+		windowTime:           windowTime,
+		maxRequestsPerWindow: maxRequestsPerWindow,
+		lastRequestsTime:     make([]int, 0, maxRequestsPerWindow),
 	}
 }
 
 func (e *Endpoint) updateAttemptsLeft(currentTime int) {
-	if currentTime/60 > e.lastTimeOfRequest/60 {
-		e.attemptsLeft = 10
-	}
-	e.lastTimeOfRequest = currentTime
+
 }
 
-func (e *Endpoint) request(currentTime int) (int, int, int) {
-	e.updateAttemptsLeft(currentTime)
+func (e *Endpoint) request(currentTime int) (int, int) {
 
-	resetTime := (currentTime/60)*60 + 60
+	if len(e.lastRequestsTime) >= e.maxRequestsPerWindow {
 
-	if e.attemptsLeft <= 0 {
-		return 429, 0, resetTime
+		if e.lastRequestsTime[0] < currentTime-e.windowTime {
+
+			e.lastRequestsTime = e.lastRequestsTime[1:]
+			e.lastRequestsTime = append(e.lastRequestsTime, currentTime)
+
+		} else {
+			return 429, len(e.lastRequestsTime)
+		}
+	} else {
+		e.lastRequestsTime = append(e.lastRequestsTime, currentTime)
 	}
 
-	e.attemptsLeft--
-	return 200, e.attemptsLeft, resetTime
+	return 200, len(e.lastRequestsTime)
 }
