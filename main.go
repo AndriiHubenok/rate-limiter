@@ -12,6 +12,7 @@ func main() {
 	conf := NewConfig()
 	sc := bufio.NewScanner(os.Stdin)
 	sc.Buffer(make([]byte, 1024*1024), 1024*1024)
+
 	for sc.Scan() {
 		line := sc.Text()
 		if line == "" {
@@ -28,38 +29,31 @@ func main() {
 				continue
 			}
 			conf.updateTime(time)
+
 		} else if cmd == "REQUEST" {
-			if _, ok := conf.endpoints[args[1]]; !ok {
-				conf.endpoints[args[1]] = NewFixedEndpoint(args[1], 10, 1.0)
+			if len(args) < 2 {
+				continue
 			}
-
-			status, used, _ := conf.makeRequest(args[1])
-
-			if status == 200 {
-				fmt.Printf("OK %d\n", used)
-			} else {
-				fmt.Println("LIMITED")
-			}
-
-		} else if cmd == "STATUS" {
-			if _, ok := conf.endpoints[args[0]]; !ok {
-				conf.endpoints[args[0]] = NewLeakyEndpoint(args[0], 5, 1.0)
-			}
-
-			fmt.Printf("water=%.2f\n", float64(conf.endpoints[args[0]].GetTokens(conf.time)))
+			ip := args[0]
+			user := args[1]
+			conf.makeRequest(ip, user)
 		}
 	}
 }
 
 type Config struct {
-	time      int
-	endpoints map[string]Limiter
+	time       int
+	ipLimits   map[string]*RateLimit
+	userLimits map[string]*RateLimit
+	global     *RateLimit
 }
 
 func NewConfig() *Config {
 	return &Config{
-		time:      0,
-		endpoints: make(map[string]Limiter),
+		time:       0,
+		ipLimits:   make(map[string]*RateLimit),
+		userLimits: make(map[string]*RateLimit),
+		global:     NewRateLimit(1000),
 	}
 }
 
@@ -67,12 +61,89 @@ func (c *Config) updateTime(time int) {
 	c.time = time
 }
 
-func (c *Config) makeRequest(name string) (int, int, int) {
-	if value, ok := c.endpoints[name]; ok {
-		return value.Request(c.time)
+func (c *Config) makeRequest(ip, user string) {
+	if _, ok := c.ipLimits[ip]; !ok {
+		c.ipLimits[ip] = NewRateLimit(5)
 	}
-	return 429, 0, 0
+	if _, ok := c.userLimits[user]; !ok {
+		c.userLimits[user] = NewRateLimit(50)
+	}
+
+	// 1. CHECK PHASE (In Order)
+	if !c.ipLimits[ip].Allow(c.time) {
+		fmt.Println("LIMITED tier=ip")
+		return
+	}
+	if !c.userLimits[user].Allow(c.time) {
+		fmt.Println("LIMITED tier=user")
+		return
+	}
+	if !c.global.Allow(c.time) {
+		fmt.Println("LIMITED tier=global")
+		return
+	}
+
+	c.ipLimits[ip].Increment(c.time)
+	c.userLimits[user].Increment(c.time)
+	c.global.Increment(c.time)
+
+	fmt.Println("OK")
 }
+
+type RateLimit struct {
+	windowStart int
+	count       int
+	limit       int
+}
+
+func NewRateLimit(limit int) *RateLimit {
+	return &RateLimit{
+		windowStart: -1,
+		count:       0,
+		limit:       limit,
+	}
+}
+
+func (r *RateLimit) sync(currentTime int) {
+	currentWindow := currentTime / 60
+	if r.windowStart != currentWindow {
+		r.windowStart = currentWindow
+		r.count = 0
+	}
+}
+
+func (r *RateLimit) Allow(currentTime int) bool {
+	r.sync(currentTime)
+	return r.count < r.limit
+}
+
+func (r *RateLimit) Increment(currentTime int) {
+	r.sync(currentTime)
+	r.count++
+}
+
+//type Config struct {
+//	time      int
+//	endpoints map[string]Limiter
+//}
+//
+//func NewConfig() *Config {
+//	return &Config{
+//		time:      0,
+//		endpoints: make(map[string]Limiter),
+//	}
+//}
+//
+//func (c *Config) updateTime(time int) {
+//	c.time = time
+//}
+//
+//func (c *Config) makeRequest(name string) (int, int, int) {
+//	if value, ok := c.endpoints[name]; ok {
+//		return value.Request(c.time)
+//	}
+//	return 429, 0, 0
+//}
 
 type Limiter interface {
 	Request(currentTime int) (status int, remaining int, resetTime int)
