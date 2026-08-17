@@ -8,13 +8,25 @@ import (
 	"strings"
 )
 
+type Plan struct {
+	capacity   float64
+	refillRate float64
+	unlimited  bool
+}
+
+var plans = map[string]Plan{
+	"free":       {capacity: 10.0, refillRate: 0.1, unlimited: false},
+	"pro":        {capacity: 100.0, refillRate: 1.0, unlimited: false},
+	"enterprise": {capacity: 0.0, refillRate: 0.0, unlimited: true},
+}
+
 func main() {
 	conf := NewConfig()
 	sc := bufio.NewScanner(os.Stdin)
 	sc.Buffer(make([]byte, 1024*1024), 1024*1024)
 
 	for sc.Scan() {
-		line := sc.Text()
+		line := strings.TrimSpace(sc.Text())
 		if line == "" {
 			continue
 		}
@@ -23,306 +35,107 @@ func main() {
 		args := parts[1:]
 
 		if cmd == "NOW" {
-			time, err := strconv.Atoi(args[0])
-			if err != nil {
-				fmt.Println("Invalid time")
-				continue
+			// Time can be fractional (e.g., 1.5)
+			t, err := strconv.ParseFloat(args[0], 64)
+			if err == nil {
+				conf.updateTime(t)
 			}
-			conf.updateTime(time)
-
+		} else if cmd == "PLAN" {
+			if len(args) >= 2 {
+				user := args[0]
+				planName := args[1]
+				conf.setPlan(user, planName)
+			}
 		} else if cmd == "REQUEST" {
-			if len(args) < 2 {
-				continue
+			if len(args) >= 1 {
+				user := args[0]
+				conf.request(user)
 			}
-			ip := args[0]
-			user := args[1]
-			conf.makeRequest(ip, user)
 		}
 	}
 }
 
+type TokenBucket struct {
+	tokens         float64
+	lastRefillTime float64
+	plan           Plan
+}
+
+func (tb *TokenBucket) sync(currentTime float64) {
+	if tb.plan.unlimited {
+		return
+	}
+
+	elapsed := currentTime - tb.lastRefillTime
+	if elapsed > 0 {
+		tb.tokens += elapsed * tb.plan.refillRate
+
+		if tb.tokens > tb.plan.capacity {
+			tb.tokens = tb.plan.capacity
+		}
+	}
+	tb.lastRefillTime = currentTime
+}
+
 type Config struct {
-	time       int
-	ipLimits   map[string]*RateLimit
-	userLimits map[string]*RateLimit
-	global     *RateLimit
+	time  float64
+	users map[string]*TokenBucket
 }
 
 func NewConfig() *Config {
 	return &Config{
-		time:       0,
-		ipLimits:   make(map[string]*RateLimit),
-		userLimits: make(map[string]*RateLimit),
-		global:     NewRateLimit(1000),
+		time:  0.0,
+		users: make(map[string]*TokenBucket),
 	}
 }
 
-func (c *Config) updateTime(time int) {
-	c.time = time
+func (c *Config) updateTime(t float64) {
+	c.time = t
 }
 
-func (c *Config) makeRequest(ip, user string) {
-	if _, ok := c.ipLimits[ip]; !ok {
-		c.ipLimits[ip] = NewRateLimit(5)
-	}
-	if _, ok := c.userLimits[user]; !ok {
-		c.userLimits[user] = NewRateLimit(50)
+func (c *Config) setPlan(user string, planName string) {
+	plan, exists := plans[planName]
+	if !exists {
+		plan = plans["free"]
 	}
 
-	// 1. CHECK PHASE (In Order)
-	if !c.ipLimits[ip].Allow(c.time) {
-		fmt.Println("LIMITED tier=ip")
-		return
-	}
-	if !c.userLimits[user].Allow(c.time) {
-		fmt.Println("LIMITED tier=user")
-		return
-	}
-	if !c.global.Allow(c.time) {
-		fmt.Println("LIMITED tier=global")
-		return
-	}
-
-	c.ipLimits[ip].Increment(c.time)
-	c.userLimits[user].Increment(c.time)
-	c.global.Increment(c.time)
-
-	fmt.Println("OK")
-}
-
-type RateLimit struct {
-	windowStart int
-	count       int
-	limit       int
-}
-
-func NewRateLimit(limit int) *RateLimit {
-	return &RateLimit{
-		windowStart: -1,
-		count:       0,
-		limit:       limit,
-	}
-}
-
-func (r *RateLimit) sync(currentTime int) {
-	currentWindow := currentTime / 60
-	if r.windowStart != currentWindow {
-		r.windowStart = currentWindow
-		r.count = 0
-	}
-}
-
-func (r *RateLimit) Allow(currentTime int) bool {
-	r.sync(currentTime)
-	return r.count < r.limit
-}
-
-func (r *RateLimit) Increment(currentTime int) {
-	r.sync(currentTime)
-	r.count++
-}
-
-//type Config struct {
-//	time      int
-//	endpoints map[string]Limiter
-//}
-//
-//func NewConfig() *Config {
-//	return &Config{
-//		time:      0,
-//		endpoints: make(map[string]Limiter),
-//	}
-//}
-//
-//func (c *Config) updateTime(time int) {
-//	c.time = time
-//}
-//
-//func (c *Config) makeRequest(name string) (int, int, int) {
-//	if value, ok := c.endpoints[name]; ok {
-//		return value.Request(c.time)
-//	}
-//	return 429, 0, 0
-//}
-
-type Limiter interface {
-	Request(currentTime int) (status int, remaining int, resetTime int)
-	UpdateTokens(currentTime int)
-	GetTokens(currentTime int) int
-}
-
-type Endpoint struct {
-	id                   string
-	windowTime           int
-	maxRequestsPerWindow int
-	lastRequestsTime     []int
-}
-
-func NewEndpoint(id string, windowTime int, maxRequestsPerWindow int) *Endpoint {
-	return &Endpoint{
-		id:                   id,
-		windowTime:           windowTime,
-		maxRequestsPerWindow: maxRequestsPerWindow,
-		lastRequestsTime:     make([]int, 0, maxRequestsPerWindow),
-	}
-}
-
-func (e *Endpoint) UpdateTokens(currentTime int) {
-
-}
-
-func (e *Endpoint) Request(currentTime int) (int, int, int) {
-
-	if len(e.lastRequestsTime) >= e.maxRequestsPerWindow {
-
-		if e.lastRequestsTime[0] < currentTime-e.windowTime {
-
-			e.lastRequestsTime = e.lastRequestsTime[1:]
-			e.lastRequestsTime = append(e.lastRequestsTime, currentTime)
-
-		} else {
-			return 429, len(e.lastRequestsTime), 0
+	tb, ok := c.users[user]
+	if !ok {
+		c.users[user] = &TokenBucket{
+			tokens:         plan.capacity,
+			lastRefillTime: c.time,
+			plan:           plan,
 		}
 	} else {
-		e.lastRequestsTime = append(e.lastRequestsTime, currentTime)
-	}
 
-	return 200, len(e.lastRequestsTime), 0
-}
+		tb.sync(c.time)
+		tb.plan = plan
 
-func (e *Endpoint) GetTokens(currentTime int) int {
-	return -1
-}
-
-type FixedEndpoint struct {
-	id                string
-	lastTimeOfRequest int
-	maxTokens         int
-	attemptsLeft      int
-	refillRate        float64
-}
-
-func NewFixedEndpoint(id string, maxTokens int, refillRate float64) *FixedEndpoint {
-	return &FixedEndpoint{
-		id:                id,
-		lastTimeOfRequest: 0,
-		maxTokens:         maxTokens,
-		attemptsLeft:      maxTokens,
-		refillRate:        refillRate,
+		if !plan.unlimited && tb.tokens > plan.capacity {
+			tb.tokens = plan.capacity
+		}
 	}
 }
 
-func (f *FixedEndpoint) UpdateTokens(currentTime int) {
-	if currentTime/60 > f.lastTimeOfRequest/60 {
-		f.attemptsLeft = f.maxTokens
-	}
-	f.lastTimeOfRequest = currentTime
-}
-
-func (f *FixedEndpoint) Request(currentTime int) (int, int, int) {
-	f.UpdateTokens(currentTime)
-
-	resetTime := (currentTime/60)*60 + 60
-
-	if f.attemptsLeft <= 0 {
-		return 429, 0, resetTime
+func (c *Config) request(user string) {
+	tb, ok := c.users[user]
+	if !ok {
+		c.setPlan(user, "free")
+		tb = c.users[user]
 	}
 
-	f.attemptsLeft--
-	return 200, f.maxTokens - f.attemptsLeft, resetTime
-}
+	tb.sync(c.time)
 
-func (f *FixedEndpoint) GetTokens(currentTime int) int {
-	return -1
-}
-
-type TokenEndpoint struct {
-	id              string
-	maxTokens       float64
-	currentTokens   float64
-	refillRate      float64
-	lastRequestTime int
-}
-
-func NewTokenEndpoint(id string, maxTokens int, refillRate float64) *TokenEndpoint {
-
-	return &TokenEndpoint{
-		id:              id,
-		maxTokens:       float64(maxTokens),
-		currentTokens:   float64(maxTokens),
-		refillRate:      refillRate,
-		lastRequestTime: 0,
+	if tb.plan.unlimited {
+		fmt.Println("OK unlimited")
+		return
 	}
-}
 
-func (t *TokenEndpoint) UpdateTokens(currentTime int) {
+	if tb.tokens >= 1.0 {
+		tb.tokens -= 1.0
 
-	newTokens := float64(currentTime-t.lastRequestTime)*t.refillRate + t.currentTokens
-
-	if newTokens > t.maxTokens {
-		t.currentTokens = t.maxTokens
+		fmt.Printf("OK %.2f\n", tb.tokens)
 	} else {
-		t.currentTokens = newTokens
+		fmt.Println("LIMITED")
 	}
-	t.lastRequestTime = currentTime
-}
-
-func (t *TokenEndpoint) Request(currentTime int) (int, int, int) {
-
-	t.UpdateTokens(currentTime)
-
-	if t.currentTokens < 1 {
-		return 429, 0, 0
-	}
-
-	t.currentTokens--
-	return 200, int(t.currentTokens), 0
-}
-
-type LeakyEndpoint struct {
-	id              string
-	maxTokens       float64
-	currentTokens   float64
-	refillRate      float64
-	lastRequestTime int
-}
-
-func NewLeakyEndpoint(id string, maxTokens int, refillRate float64) *LeakyEndpoint {
-
-	return &LeakyEndpoint{
-		id:              id,
-		maxTokens:       float64(maxTokens),
-		currentTokens:   0,
-		refillRate:      refillRate,
-		lastRequestTime: 0,
-	}
-}
-
-func (l *LeakyEndpoint) UpdateTokens(currentTime int) {
-
-	newTokens := l.currentTokens - float64(currentTime-l.lastRequestTime)*l.refillRate
-
-	if newTokens <= 0 {
-		l.currentTokens = 0
-	} else {
-		l.currentTokens = newTokens
-	}
-	l.lastRequestTime = currentTime
-}
-
-func (l *LeakyEndpoint) Request(currentTime int) (int, int, int) {
-
-	l.UpdateTokens(currentTime)
-
-	if l.currentTokens >= 5 {
-		return 429, 0, 0
-	}
-
-	l.currentTokens++
-	return 200, int(l.currentTokens), 0
-}
-
-func (l *LeakyEndpoint) GetTokens(currentTime int) int {
-	l.UpdateTokens(currentTime)
-	return int(l.currentTokens)
 }
