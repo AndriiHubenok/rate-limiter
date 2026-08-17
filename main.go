@@ -29,14 +29,14 @@ func main() {
 			}
 			conf.updateTime(time)
 		} else if cmd == "REQUEST" {
-			if _, ok := conf.endpoints[args[0]]; !ok {
-				conf.endpoints[args[0]] = NewLeakyEndpoint(args[0], 5, 1.0)
+			if _, ok := conf.endpoints[args[1]]; !ok {
+				conf.endpoints[args[1]] = NewFixedEndpoint(args[1], 10, 1.0)
 			}
 
-			status, used, _ := conf.makeRequest(args[0])
+			status, used, _ := conf.makeRequest(args[1])
 
 			if status == 200 {
-				fmt.Printf("OK %.2f\n", float64(used))
+				fmt.Printf("OK %d\n", used)
 			} else {
 				fmt.Println("LIMITED")
 			}
@@ -52,15 +52,13 @@ func main() {
 }
 
 type Config struct {
-	time int
-	//endpoints map[string]*Endpoint
+	time      int
 	endpoints map[string]Limiter
 }
 
 func NewConfig() *Config {
 	return &Config{
-		time: 0,
-		//endpoints: make(map[string]*Endpoint),
+		time:      0,
 		endpoints: make(map[string]Limiter),
 	}
 }
@@ -98,7 +96,7 @@ func NewEndpoint(id string, windowTime int, maxRequestsPerWindow int) *Endpoint 
 	}
 }
 
-func (e *Endpoint) updateAttemptsLeft(currentTime int) {
+func (e *Endpoint) UpdateTokens(currentTime int) {
 
 }
 
@@ -119,6 +117,52 @@ func (e *Endpoint) Request(currentTime int) (int, int, int) {
 	}
 
 	return 200, len(e.lastRequestsTime), 0
+}
+
+func (e *Endpoint) GetTokens(currentTime int) int {
+	return -1
+}
+
+type FixedEndpoint struct {
+	id                string
+	lastTimeOfRequest int
+	maxTokens         int
+	attemptsLeft      int
+	refillRate        float64
+}
+
+func NewFixedEndpoint(id string, maxTokens int, refillRate float64) *FixedEndpoint {
+	return &FixedEndpoint{
+		id:                id,
+		lastTimeOfRequest: 0,
+		maxTokens:         maxTokens,
+		attemptsLeft:      maxTokens,
+		refillRate:        refillRate,
+	}
+}
+
+func (f *FixedEndpoint) UpdateTokens(currentTime int) {
+	if currentTime/60 > f.lastTimeOfRequest/60 {
+		f.attemptsLeft = f.maxTokens
+	}
+	f.lastTimeOfRequest = currentTime
+}
+
+func (f *FixedEndpoint) Request(currentTime int) (int, int, int) {
+	f.UpdateTokens(currentTime)
+
+	resetTime := (currentTime/60)*60 + 60
+
+	if f.attemptsLeft <= 0 {
+		return 429, 0, resetTime
+	}
+
+	f.attemptsLeft--
+	return 200, f.maxTokens - f.attemptsLeft, resetTime
+}
+
+func (f *FixedEndpoint) GetTokens(currentTime int) int {
+	return -1
 }
 
 type TokenEndpoint struct {
